@@ -1,0 +1,22 @@
+name = "clipboard-api"
+main = "index.js"
+compatibility_date = "2026-02-03"
+compatibility_flags = ["nodejs_compat"]
+
+# D1 数据库绑定
+[[d1_databases]]
+binding = "DB"
+database_name = "clipboard_db"
+database_id = "9adc5963-73cf-485a-a63d-0ab2bdf9706f"
+
+# 可选：如果将来需要 KV 或 Durable Objects，可以在这里添加
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+persist = true
+invocation_logs = true
