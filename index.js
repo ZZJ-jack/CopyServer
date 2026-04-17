@@ -77,6 +77,16 @@ async function decryptContent(ciphertext, ivHex, saltHex, password) {
   return decoder.decode(plainBuffer);
 }
 
+// ==================== 辅助函数：安全转换 D1 BLOB ====================
+function toArrayBuffer(data) {
+  if (data === null || data === undefined) return null;
+  if (data instanceof ArrayBuffer) return data;
+  if (ArrayBuffer.isView(data)) return data.buffer;
+  if (typeof data === 'string') return encoder.encode(data).buffer;
+  console.warn('未知 BLOB 类型，尝试强制转换:', typeof data, data.constructor.name);
+  return new Uint8Array(data).buffer;
+}
+
 // ==================== HTTP 响应辅助函数 ====================
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -131,15 +141,17 @@ async function handleCreate(request, env) {
     
     if (hasPassword) {
       const encrypted = await encryptContent(content, password);
-      encryptedContent = encrypted.ciphertext;
+      encryptedContent = encrypted.ciphertext;  // ArrayBuffer
       ivHex = encrypted.iv;
       saltHex = encrypted.salt;
+      console.log(`加密完成，iv: ${ivHex.substring(0,8)}..., salt: ${saltHex.substring(0,8)}...`);
     } else {
-      encryptedContent = encoder.encode(content).buffer;
+      encryptedContent = encoder.encode(content).buffer;  // ArrayBuffer
       ivHex = '';
       saltHex = '';
     }
     
+    console.log('准备插入 BLOB，类型:', encryptedContent.constructor.name);
     try {
       await env.DB.prepare(`
         INSERT INTO clipboards (name, content, iv, salt)
@@ -184,17 +196,29 @@ async function handleGet(request, env) {
   
   if (!row) return errorResponse('未找到该名称对应的剪贴板', 404);
   
+  // 关键修复：将 D1 返回的 BLOB 强制转为 ArrayBuffer
+  const contentBuffer = toArrayBuffer(row.content);
+  if (!contentBuffer) {
+    console.error('content 字段为空或无效');
+    return errorResponse('内容数据损坏', 500);
+  }
+  
+  console.log(`读取到 BLOB，大小: ${contentBuffer.byteLength} bytes, iv存在: ${!!row.iv}`);
+  
   try {
     let plainContent;
     if (row.iv) {
       if (!password) return errorResponse('该剪贴板需要密码访问', 401);
-      plainContent = await decryptContent(row.content, row.iv, row.salt, password);
+      
+      console.log('开始解密，iv:', row.iv.substring(0,8)+'...', 'salt:', row.salt?.substring(0,8)+'...');
+      plainContent = await decryptContent(contentBuffer, row.iv, row.salt, password);
+      console.log('解密成功，内容长度:', plainContent.length);
     } else {
-      plainContent = decoder.decode(row.content);
+      plainContent = decoder.decode(contentBuffer);
     }
     return jsonResponse({ name, content: plainContent, protected: !!row.iv });
   } catch (e) {
-    console.error('解密失败或密码错误:', e);
+    console.error('解密或解码失败:', e.message, e.stack);
     return errorResponse('密码错误或内容已损坏', 403);
   }
 }
@@ -229,8 +253,13 @@ async function handleDelete(request, env) {
       SELECT content, iv, salt FROM clipboards WHERE name = ?
     `).bind(name).first();
     
+    const contentBuffer = toArrayBuffer(fullRow.content);
+    if (!contentBuffer) {
+      return errorResponse('内容数据损坏', 500);
+    }
+    
     try {
-      await decryptContent(fullRow.content, fullRow.iv, fullRow.salt, password);
+      await decryptContent(contentBuffer, fullRow.iv, fullRow.salt, password);
     } catch (e) {
       console.error('密码验证失败:', e);
       return errorResponse('密码错误，无权删除', 403);
@@ -259,7 +288,6 @@ export default {
     const path = url.pathname;
     const method = request.method;
 
-    // 记录请求日志
     console.log(`${method} ${path}${url.search}`);
 
     // 处理 CORS 预检
@@ -278,12 +306,10 @@ export default {
         }
       }
 
-      // 404
       console.warn(`路由未找到: ${path}`);
       return errorResponse('Not Found', 404);
       
     } catch (error) {
-      // 全局错误捕获：打印详细错误到日志，返回友好 JSON
       console.error('Unhandled error in fetch:', error);
       return jsonResponse({
         error: 'Internal Server Error',
